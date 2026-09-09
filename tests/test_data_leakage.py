@@ -42,6 +42,8 @@ NOTEBOOK_CELLS = {
     'ridge_fit': (33, 'baseline_model.fit('),
     'ridge_metrics': (34, 'y_train_pred = baseline_model.predict('),
     'word2vec_fit': (38, 'w2v_model = Word2Vec('),
+    'word_features': (40, 'def build_word_encoder('),
+    'word_model': (41, 'word_encoder = build_word_encoder('),
     'first_lstm_fit': (25, 'history = model1.fit('),
     'second_lstm_fit': (43, 'history = model2.fit('),
     'sentence_features': (47, 'def sentence_features('),
@@ -194,6 +196,7 @@ class TestDataLeakageRegression(unittest.TestCase):
 
     def test_lstm_explicit_validation(self):
         scope = self.build_pipeline_fixture()
+        self.prepare_word_features(scope)
 
         # Record the real fit call's inputs without constructing or training an LSTM.
         class Model:
@@ -205,16 +208,89 @@ class TestDataLeakageRegression(unittest.TestCase):
             model = Model()
             scope[name] = model
             execute_notebook_cell(cell_name, scope, ('tensorflow',))
+            prefix = 'X_word_' if name == 'model2' else 'X_'
             self.assertIs(model.labels, scope['y_train'])
-            self.assertIs(model.inputs[0], scope['X_query_train'])
+            self.assertIs(model.inputs[0], scope[prefix + 'query_train'])
+            self.assertIs(model.inputs[1], scope[prefix + 'product_train'])
             validation_inputs, labels = model.kwargs['validation_data']
-            self.assertIs(validation_inputs[0], scope['X_query_val'])
-            self.assertIs(validation_inputs[1], scope['X_product_val'])
+            self.assertIs(validation_inputs[0], scope[prefix + 'query_val'])
+            self.assertIs(validation_inputs[1], scope[prefix + 'product_val'])
             self.assertIs(labels, scope['y_val'])
             self.assertNotIn('validation_split', model.kwargs)
             self.assertEqual(model.kwargs['epochs'], 10)
             self.assertEqual(model.kwargs['callbacks'], [dict(
                 monitor='val_loss', patience=3, restore_best_weights=True)])
+
+    def prepare_word_features(self, scope):
+        # Supply known vectors to verify ID-to-vector alignment without gensim.
+        class WordVectors:
+            index_to_key = ['hammer', 'steel', 'tool', 'durable']
+            vector_size = 100
+
+            def __getitem__(self, word):
+                return np.full(self.vector_size, self.index_to_key.index(word) + 1,
+                               dtype=np.float32)
+
+        scope['w2v_model'] = type('Word2VecStub', (), {'wv': WordVectors()})()
+        for frame in [scope['train_prepared'], scope['validation_prepared']]:
+            frame['search_term_tokens'] = frame.search_term.str.split()
+            frame['product_text_tokens'] = frame.product_text.str.split()
+        execute_notebook_cell('word_features', scope, ('tensorflow',))
+
+    def test_word2vec_embedding_and_word_inputs(self):
+        scope = self.build_pipeline_fixture()
+        self.prepare_word_features(scope)
+        matrix = scope['word_embedding_matrix']
+        np.testing.assert_array_equal(matrix[0], np.zeros(100))
+        self.assertNotIn('validationexclusive', scope['word2idx'])
+        self.assertEqual(scope['X_word_query_val'][0, 0], scope['WORD_UNK_ID'])
+        for word, index in scope['word2idx'].items():
+            np.testing.assert_array_equal(matrix[index], scope['w2v_model'].wv[word])
+        for partition, labels in [('train', 'y_train'), ('val', 'y_val')]:
+            self.assertEqual(scope['X_word_query_' + partition].shape, (len(scope[labels]), 40))
+            self.assertEqual(scope['X_word_product_' + partition].shape, (len(scope[labels]), 400))
+        samples = pd.DataFrame({
+            'search_term_tokens': [[], ['hammer'] * 45],
+            'product_text_tokens': [[], ['steel'] * 405],
+        })
+        queries, products = scope['encode_word_partition'](samples)
+        self.assertFalse(queries[0].any())
+        self.assertFalse(products[0].any())
+        self.assertTrue((queries[1] == scope['word2idx']['hammer']).all())
+        self.assertTrue((products[1] == scope['word2idx']['steel']).all())
+
+        # Record the actual model-building calls: both branches must invoke the
+        # same word encoder, initialized with the Word2Vec matrix.
+        embedding_calls, encoder_inputs = [], []
+
+        def embedding(**kwargs):
+            embedding_calls.append(kwargs)
+            return lambda inputs: object()
+
+        class SharedEncoder:
+            def __call__(self, inputs):
+                encoder_inputs.append(inputs)
+                return object()
+
+        scope.update({
+            'Input': lambda **kwargs: kwargs,
+            'Embedding': embedding,
+            'Dropout': lambda *args: lambda inputs: object(),
+            'LSTM': lambda *args: lambda inputs: object(),
+            'Model': lambda *args, **kwargs: SharedEncoder(),
+            'Dense': lambda *args, **kwargs: lambda inputs: object(),
+            'Lambda': lambda *args: lambda inputs: object(),
+            'Concatenate': lambda: lambda inputs: object(),
+        })
+        execute_notebook_cell('word_model', scope, ('tensorflow',))
+        self.assertEqual(len(embedding_calls), 1)
+        embedding_config = embedding_calls[0]
+        self.assertIs(embedding_config['weights'][0], matrix)
+        self.assertEqual(embedding_config['output_dim'], 100)
+        self.assertTrue(embedding_config['mask_zero'])
+        self.assertTrue(embedding_config['trainable'])
+        self.assertEqual(encoder_inputs, [scope['query_input'], scope['product_input']])
+        self.assertEqual([item['shape'] for item in encoder_inputs], [(40,), (400,)])
 
     def test_mlp_stopping_and_checkpoint(self):
         # Load the actual early-stopping helper without starting model training.

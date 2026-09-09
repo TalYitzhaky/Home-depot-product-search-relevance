@@ -15,7 +15,7 @@ A notebook-based machine learning project that predicts how relevant a Home Depo
 - **Data augmentation:** splits original examples into 80% training and 20% validation (`random_state=42`), then samples 4% of only the training partition and creates English, Spanish, French, and German variants of search terms and product titles. Product descriptions remain unchanged.
 - **Character-level Siamese LSTM:** shares an encoder between queries and product text, then combines their representations and absolute difference to predict relevance. Inputs are truncated or padded to 40 query characters and 400 product characters.
 - **TF-IDF baseline:** uses up to 5,000 features from product titles and search terms with Ridge regression.
-- **Word2Vec experiment:** tokenizes the text and trains 100-dimensional word embeddings.
+- **Word-level Siamese LSTM:** tokenizes text and trains 100-dimensional Word2Vec embeddings on training tokens only. A shared LSTM uses those embeddings, fine-tunes them during training, and processes sequences capped at 40 query words and 400 product words. Padding is masked; unseen or rare words map to an unknown-word ID.
 - **Sentence-BERT features:** uses `sentence-transformers/all-MiniLM-L6-v2` embeddings, combining query and product vectors with their absolute difference and elementwise product. Standardized features feed an MLP regressor.
 
 Evaluation includes mean squared error (MSE), root mean squared error (RMSE), mean absolute error (MAE), training curves, and prediction plots.
@@ -56,7 +56,6 @@ Use a Python environment with Jupyter and the dependencies above. Replace the Go
 
 ## Experiment notes
 
-- The section labeled **Word-level Siamese LSTM** currently rebuilds the character encoder and trains on the same character inputs. The trained Word2Vec embeddings are not connected to that model.
 - All models use the same split of original example IDs. Augmented variants stay in training; validation examples are not augmented. Different examples involving the same product may occur in both partitions.
 - Character vocabulary, TF-IDF, Word2Vec, and feature scaling are fitted only on training data. Validation uses those fitted transformations and the fixed pretrained Sentence-BERT encoder.
 - Both LSTMs use explicit validation data and early stopping on validation loss (patience 3, best weights restored, at most 10 epochs). The MLP uses an explicit epoch loop with validation R² (patience 10, tolerance 0.0001, at most 200 epochs), restores the best model, and creates no internal validation split.
