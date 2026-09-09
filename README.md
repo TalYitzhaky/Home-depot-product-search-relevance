@@ -7,12 +7,12 @@ A notebook-based machine learning project that predicts how relevant a Home Depo
 | File | Description |
 | --- | --- |
 | [Home depot product search relevance.ipynb](Home%20depot%20product%20search%20relevance.ipynb) | Data preparation, model training, evaluation, and visualizations. |
-| [Home depot product search relevance - outputs.html](Home%20depot%20product%20search%20relevance%20-%20outputs.html) | Exported notebook outputs; download and open in a browser to view locally. |
-| [report.pdf](report.pdf) | Project report. |
+| [Home depot product search relevance - outputs.html](Home%20depot%20product%20search%20relevance%20-%20outputs.html) | Historical notebook outputs from before the leakage fix; download and open in a browser to view locally. |
+| [report.pdf](report.pdf) | Historical project report from before the leakage fix. |
 
 ## Approach
 
-- **Data augmentation:** samples 4% of the training data and creates English, Spanish, French, and German variants of search terms and product titles. Product descriptions remain unchanged.
+- **Data augmentation:** splits original examples into 80% training and 20% validation (`random_state=42`), then samples 4% of only the training partition and creates English, Spanish, French, and German variants of search terms and product titles. Product descriptions remain unchanged.
 - **Character-level Siamese LSTM:** shares an encoder between queries and product text, then combines their representations and absolute difference to predict relevance. Inputs are truncated or padded to 40 query characters and 400 product characters.
 - **TF-IDF baseline:** uses up to 5,000 features from product titles and search terms with Ridge regression.
 - **Word2Vec experiment:** tokenizes the text and trains 100-dimensional word embeddings.
@@ -40,7 +40,7 @@ The notebook is written for Google Colab and uses Google Drive for dataset stora
 
 3. Upload or open `Home depot product search relevance.ipynb` in Colab. A GPU runtime can help with neural model training and embedding generation.
 4. Run the Drive mount cell and authorize access. Adjust the `/content/drive/MyDrive/` paths if your archives are stored elsewhere.
-5. Run the remaining cells in order. The setup cell deletes and recreates its dataset directories under `/content`, then copies and extracts the archives.
+5. Restart the runtime and run all cells in order to avoid reusing variables from earlier experiments. The setup cell deletes and recreates its dataset directories under `/content`, then copies and extracts the archives.
 
 The notebook installs `deep-translator`, `googletrans==4.0.0-rc1`, `gensim`, and `sentence-transformers` in individual cells. It also uses NumPy, pandas, Matplotlib, scikit-learn, TensorFlow/Keras, NLTK, and tqdm. If these are missing from your runtime, install them before running the relevant cells:
 
@@ -57,6 +57,23 @@ Use a Python environment with Jupyter and the dependencies above. Replace the Go
 ## Experiment notes
 
 - The section labeled **Word-level Siamese LSTM** currently rebuilds the character encoder and trains on the same character inputs. The trained Word2Vec embeddings are not connected to that model.
-- Augmentation and some feature fitting happen before validation splitting. Related or duplicate examples can cross splits, and vocabulary fitting can include validation text, so the recorded metrics should be treated as exploratory results.
+- All models use the same split of original example IDs. Augmented variants stay in training; validation examples are not augmented. Different examples involving the same product may occur in both partitions.
+- Character vocabulary, TF-IDF, Word2Vec, and feature scaling are fitted only on training data. Validation uses those fitted transformations and the fixed pretrained Sentence-BERT encoder.
+- Both LSTMs use explicit validation data and early stopping on validation loss (patience 3, best weights restored, at most 10 epochs). The MLP uses an explicit epoch loop with validation R² (patience 10, tolerance 0.0001, at most 200 epochs), restores the best model, and creates no internal validation split.
+- Validation guides early stopping; its metrics are not an independent final test score. Notebook outputs have been cleared and must be regenerated. The existing HTML export and PDF report retain historical results from before the leakage fix.
 - The notebook does not pin a complete environment or seed every source of randomness; results may vary between runs.
 - The test data is loaded, but the notebook does not generate a submission file or save trained models.
+
+## Tests
+
+[tests/test_data_leakage.py](tests/test_data_leakage.py) contains offline regression tests for the train/validation leakage fix. They verify that augmentation and fitted preprocessing use training data only, validation data remains untouched, and early stopping uses the explicit validation set.
+
+The tests intentionally execute actual notebook cells. Heavy ML dependencies and translation are replaced with lightweight offline substitutes, so running the tests requires no original dataset, pretrained model downloads, or external APIs. This is targeted regression coverage for the leakage fix, not a comprehensive project test suite.
+
+With NumPy, pandas, scikit-learn, and nbformat installed, run:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The checks also cover feature alignment, best-model restoration, and notebook structure. Named cell references are centralized in `NOTEBOOK_CELLS`, with source checks that report unexpected layout changes. Moving or rewriting those cells may require updating the references; the tests do not retrain the full notebook.
